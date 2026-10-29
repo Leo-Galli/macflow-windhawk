@@ -1,0 +1,8 @@
+*.o
+*.obj
+*.dll
+*.pdb
+*.ilk
+ci-headers/
+__pycache__/
+*.pyc

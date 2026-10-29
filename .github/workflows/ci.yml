@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-metadata:
+    name: Validate mod metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ==WindhawkMod== blocks
+        run: python3 scripts/validate_mods.py
+
+  check-links:
+    name: Check README links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Link check
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress README.md docs/*.md CONTRIBUTING.md CHANGELOG.md
+          fail: true
+
+  syntax-check:
+    name: Best-effort syntax check (informational)
+    runs-on: windows-latest
+    # This is NOT a full build against the real Windhawk engine: the engine's
+    # actual compile step links against an internal header
+    # (windhawk_api_internal.h) that ships only with the Windhawk application
+    # itself and is not publicly redistributed, so it cannot be fetched here.
+    # Instead, this job fetches the same two public, IDE-oriented headers the
+    # upstream ramensoftware/windhawk-mods repository itself publishes for
+    # editor/IntelliSense use (under the same WH_EDITING mode their own
+    # .vscode workspace uses) and runs a syntax/type-only check against a
+    # real mingw-w64 toolchain. A failure here is a real signal; success here
+    # is not proof the mod builds and loads correctly in the real Windhawk
+    # app - see docs/TESTING.md for what still requires a human to verify.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSYS2 (mingw-w64 clang)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          install: mingw-w64-clang-x86_64-clang
+      - name: Fetch public Windhawk headers
+        shell: bash
+        run: |
+          mkdir -p ci-headers
+          curl -fsSL -o ci-headers/windhawk_api.h \
+            https://raw.githubusercontent.com/ramensoftware/windhawk-mods/main/.vscode/windhawk_headers_1.7.3/windhawk_api.h
+          curl -fsSL -o ci-headers/windhawk_utils.h \
+            https://raw.githubusercontent.com/ramensoftware/windhawk-mods/main/.vscode/windhawk_headers_1.7.3/windhawk_utils.h
+      - name: Syntax check each mod
+        shell: msys2 {0}
+        run: |
+          set -e
+          for f in mods/*.wh.cpp; do
+            echo "::group::$f"
+            modid=$(basename "$f" .wh.cpp)
+            clang++ -x c++ -std=c++23 -fsyntax-only \
+              -DUNICODE -D_UNICODE -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
+              -D_WIN32_IE=0x0A00 -DNTDDI_VERSION=0x0A000008 \
+              -D__USE_MINGW_ANSI_STDIO=0 -DWH_MOD -DWH_EDITING -DINITGUID \
+              -DWH_MOD_ID="L\"$modid\"" \
+              -Wno-pragma-pack -Wno-pragma-system-header-outside-header \
+              -include windhawk_api.h -I ci-headers \
+              "$f"
+            echo "::endgroup::"
+          done
