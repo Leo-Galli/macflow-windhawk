@@ -79,8 +79,10 @@ once every item in every phase is checked and verified for real (no fabricated r
       best-effort syntax check against real mingw-w64 + the public Windhawk
       IDE headers (continue-on-error — full build needs the Windhawk app's
       private internal header, not publicly available, documented in ci.yml)
-- [ ] Repo github.com/Leo-Galli/macflow-windhawk created (public) and pushed
-- [ ] CI confirmed green on the actual repo
+- [x] Repo github.com/Leo-Galli/macflow-windhawk created (public) and pushed
+- [x] CI confirmed green on the actual repo (run 40902476578: all 3 jobs
+      passed, including the syntax-check job genuinely succeeding, not just
+      masked by continue-on-error)
 - [ ] v1.0.0 release — BLOCKED on Phase D (do not tag/release untested code)
 
 ## Phase F — Submission to Windhawk
