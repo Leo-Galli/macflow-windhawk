@@ -56,9 +56,16 @@ once every item in every phase is checked and verified for real (no fabricated r
       locally-supplied `WH_MOD_ID` define, which the real Windhawk engine
       supplies automatically at actual build time — confirmed necessary
       because `windhawk_utils.h`'s `SetWindowSubclassFromAnyThread` macro-
-      expands it). Full link-time verification (resolving `Wh_*` engine
-      imports) still requires loading the mods in the real Windhawk app —
-      see Phase D.
+      expands it).
+- [x] **Real bug found via an actual in-app compile attempt (by the user) and
+      fixed**: `macflow-start` (and latently `macflow-dock` and
+      `macflow-notifications`) were missing `-lcomctl32`, causing a real
+      linker failure (`undefined symbol: DefSubclassProc` /
+      `SetWindowSubclass` / `RemoveWindowSubclass`). Fixed, then verified
+      with a full `-shared` link (not just `-c`/syntax-only) against every
+      real system library, using a local-only stub for the engine-internal
+      `InternalWh_*` functions — see docs/TESTING.md for detail. All 4 mods
+      now link cleanly.
 
 ## Phase D — Testing and screenshots (requires user participation — see constraints above)
 - [x] Each mod compiles cleanly (real compiler, zero warnings) — verified by assistant

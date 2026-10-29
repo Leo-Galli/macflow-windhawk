@@ -8,7 +8,7 @@
 // @homepage        https://github.com/Leo-Galli/macflow-windhawk
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -ldwmapi -lshell32 -luser32 -lole32 -loleaut32 -luuid -lgdi32
+// @compilerOptions -ldwmapi -lcomctl32 -lshell32 -luser32 -lole32 -loleaut32 -luuid -lgdi32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==

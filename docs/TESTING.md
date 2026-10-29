@@ -16,7 +16,21 @@ version the Windhawk engine itself uses per `RESEARCH.md` Section 1):
 | Compiles with zero errors | `clang++ -x c++ -std=c++23 -target x86_64-w64-mingw32` with the same defines as the repo's own `compile_flags.txt`, plus `-DWH_MOD_ID` (supplied automatically by the real engine at actual build time; required locally because `windhawk_utils.h`'s `SetWindowSubclassFromAnyThread` macro-expands it) | PASS, all 4 mods |
 | Compiles with zero warnings | Same, with `-Wall -Wextra` added | PASS, all 4 mods |
 | Every referenced API exists | Verified against the real headers shipped in `C:\Program Files\Windhawk\Compiler\include` (`windhawk_api.h`, `windhawk_utils.h`, `dwmapi.h`, `uxtheme.h`, `commctrl.h`, `uiautomationclient.h`, `shellapi.h`, `wingdi.h`, `winuser.h`) before being used in code — see `RESEARCH.md` and the design decisions in `DESIGN.md` | PASS |
-| Full link against the Windhawk engine's `Wh_*` exports | Not performed — the engine's real link step was not reproduced locally (the exact import library / symbol-resolution mechanism the engine uses was not available to invoke outside the app itself) | **NOT VERIFIED** — this is checked when the mod is loaded via the real Windhawk app, see below |
+| Full `-shared` DLL link against every real system library (comctl32, dwmapi, user32, shell32, ole32, uiautomationclient, etc.) | `clang++ -shared` with each mod's exact `@compilerOptions`, linked together with a local-only stub providing dummy bodies for the four `InternalWh_*` functions the real engine supplies at actual mod load time (`Wh_GetIntSetting`/`Wh_GetStringSetting`/`Wh_FreeStringSetting`/`Wh_SetFunctionHook` each resolve to one `InternalWh_*` call per `windhawk_api.h` — confirmed by reading the header, not guessed) | PASS, all 4 mods, after fixing a real bug (see below) |
+
+**Real bug found and fixed (2026-10-29, during an actual in-app compile by
+the user):** the real Windhawk engine's link step failed with `undefined
+symbol: DefSubclassProc` / `SetWindowSubclass` / `RemoveWindowSubclass` for
+`macflow-start` (the same bug was latent in `macflow-dock` and
+`macflow-notifications` too, not yet hit because they hadn't been compiled
+in-app yet). Root cause: those three mods were missing `-lcomctl32` in
+`@compilerOptions` - `macflow-explorer` already had it. This was not caught
+by the earlier `-c`/`-fsyntax-only` checks because those don't perform
+linking. Fixed by adding `-lcomctl32` to all three, then verified with the
+full `-shared` link described above, which specifically exercises linking
+(not just syntax) and would have caught this bug if it had been run from the
+start. `docs/TESTING.md`'s process going forward includes this fuller
+link-level check for any new mod or dependency.
 
 ## What requires a human at the keyboard (not yet done)
 

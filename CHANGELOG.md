@@ -4,6 +4,15 @@ All notable changes to MacFlow are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `macflow-dock`, `macflow-notifications`, `macflow-start`: added missing
+  `-lcomctl32` to `@compilerOptions`. Without it, the real Windhawk engine's
+  link step failed with `undefined symbol: DefSubclassProc` /
+  `SetWindowSubclass` / `RemoveWindowSubclass` (found via an actual in-app
+  compile attempt). `macflow-explorer` was unaffected, it already linked
+  comctl32.
+
 Initial implementation of the MacFlow suite. Not yet tagged as a release:
 hands-on hardware testing (see `docs/TESTING.md`) is still pending before a
 v1.0.0 release is cut.

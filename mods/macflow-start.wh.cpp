@@ -8,7 +8,7 @@
 // @homepage        https://github.com/Leo-Galli/macflow-windhawk
 // @include         StartMenuExperienceHost.exe
 // @architecture    x86-64
-// @compilerOptions -ldwmapi -luser32
+// @compilerOptions -ldwmapi -lcomctl32 -luser32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
