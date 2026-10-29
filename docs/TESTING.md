@@ -32,6 +32,53 @@ full `-shared` link described above, which specifically exercises linking
 start. `docs/TESTING.md`'s process going forward includes this fuller
 link-level check for any new mod or dependency.
 
+## Real bugs found via actual hands-on testing (2026-10-29)
+
+The user installed all 4 mods in the real Windhawk app on a dual-monitor
+machine. Two classes of real, user-reported bugs were found and fixed -
+neither was caught by compile/link verification alone, since both are
+runtime logic bugs:
+
+1. **`macflow-dock`: dock appeared broken on one monitor, had no effect on
+   the other.** Root cause: the taskbar-edge detection used
+   `SHAppBarMessage(ABM_GETTASKBARPOS)`, which is documented to only report
+   the **primary** monitor's taskbar position in multi-monitor setups - so
+   the check was unreliable for a secondary-monitor tray window. Separately,
+   the margin-inset transform ran unconditionally on every
+   `WM_WINDOWPOSCHANGING`, including pure z-order/activation calls that
+   don't request a move or resize; if such a call echoed back the window's
+   *current* (already-inset) rect, the transform would compound on top of
+   it, shrinking the bar further each time until it visually collapsed.
+   Fixed by: (a) only transforming the rect when both `SWP_NOMOVE` and
+   `SWP_NOSIZE` are clear (i.e. a real move+resize is actually being
+   requested), and (b) detecting the bottom edge via
+   `MonitorFromWindow`/`GetMonitorInfo` against that specific window's own
+   monitor bounds, instead of the primary-monitor-only appbar query.
+2. **`macflow-notifications`, `macflow-start`, `macflow-explorer`: no visible
+   effect at all.** Root cause: all three only hooked *future*
+   `CreateWindowExW` calls to find their target window. The Notification
+   Center / Quick Settings / Start menu host windows are typically created
+   once by their process and then only shown/hidden (not recreated per
+   open), and the user's Explorer window was already open before the mods
+   were enabled - so the hook never fired for windows that already existed.
+   Fixed by adding an `EnumWindows` initial scan (filtered to the current
+   process via `GetWindowThreadProcessId`) at `Wh_ModInit`, matching the
+   pattern `macflow-dock` already used for the taskbar. This also surfaced
+   a related latent bug while fixing `macflow-explorer`: its
+   `WM_WINDOWPOSCHANGED` handler called `DiscoverChildren` while already
+   holding its single mutex, and `DiscoverChildren` ->
+   `WatchControlForRoundedSelection` locked that *same* non-recursive
+   `std::mutex` again - a real deadlock on the first layout of any Explorer
+   window, independent of the `EnumWindows` fix. Resolved by splitting into
+   two mutexes (one for the window list, one for the notify-parent/
+   watched-control lists) and switching the window list to
+   `vector<unique_ptr<...>>` so a pointer into it stays valid without
+   holding its lock across the unlocked `DiscoverChildren` call.
+
+All 4 mods were re-verified with the full `-shared` link check after these
+fixes (zero warnings, zero errors). Visual/behavioral re-confirmation on the
+real desktop is still pending the user's next test pass.
+
 ## What requires a human at the keyboard (not yet done)
 
 Everything below requires installing each mod through the real Windhawk

@@ -172,6 +172,51 @@ LRESULT CALLBACK FlyoutSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
+void TrackWindow(HWND hwnd) {
+    {
+        std::lock_guard<std::mutex> lock(g_trackedWindowsMutex);
+        if (std::find(g_trackedWindows.begin(), g_trackedWindows.end(),
+                      hwnd) != g_trackedWindows.end()) {
+            return;
+        }
+    }
+
+    if (WindhawkUtils::SetWindowSubclassFromAnyThread(hwnd, FlyoutSubclassProc,
+                                                       0)) {
+        {
+            std::lock_guard<std::mutex> lock(g_trackedWindowsMutex);
+            g_trackedWindows.push_back(hwnd);
+        }
+        // The window may already be shown and sized by the time the mod is
+        // enabled (e.g. a Notification Center/Quick Settings host window
+        // created before this mod loaded) - evaluate it immediately instead
+        // of waiting for a future WM_WINDOWPOSCHANGED that may never come.
+        RECT rect{};
+        if (GetWindowRect(hwnd, &rect)) {
+            int heightDip = EffectiveHeightDip(hwnd, rect.bottom - rect.top);
+            if (heightDip >= kMinHeightDip) {
+                ApplyFlyoutVisuals(hwnd);
+            }
+        }
+    }
+}
+
+BOOL CALLBACK EnumExistingWindowsProc(HWND hwnd, LPARAM /*lParam*/) {
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId != GetCurrentProcessId()) {
+        return TRUE;
+    }
+
+    WCHAR className[64];
+    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) > 0 &&
+        IsClassNameMatch(className)) {
+        TrackWindow(hwnd);
+    }
+
+    return TRUE;
+}
+
 HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName,
                                   LPCWSTR lpWindowName, DWORD dwStyle, int X,
                                   int Y, int nWidth, int nHeight,
@@ -184,11 +229,7 @@ HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName,
         return hwnd;
     }
 
-    if (WindhawkUtils::SetWindowSubclassFromAnyThread(hwnd, FlyoutSubclassProc,
-                                                       0)) {
-        std::lock_guard<std::mutex> lock(g_trackedWindowsMutex);
-        g_trackedWindows.push_back(hwnd);
-    }
+    TrackWindow(hwnd);
 
     return hwnd;
 }
@@ -233,6 +274,11 @@ BOOL Wh_ModInit() {
     Wh_SetFunctionHook(reinterpret_cast<void*>(CreateWindowExW),
                         reinterpret_cast<void*>(CreateWindowExW_Hook),
                         reinterpret_cast<void**>(&g_origCreateWindowExW));
+
+    // The flyout host window is typically created once, well before this
+    // mod is enabled, and then only shown/hidden - the CreateWindowExW hook
+    // alone would never see it. Scan for it once at startup too.
+    EnumWindows(EnumExistingWindowsProc, 0);
 
     return TRUE;
 }

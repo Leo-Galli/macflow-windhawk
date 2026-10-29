@@ -94,6 +94,7 @@ optional hover highlight, for a macOS dock feel. Part of the MacFlow suite
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -157,21 +158,46 @@ LRESULT CALLBACK TraySubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
     switch (uMsg) {
         case WM_WINDOWPOSCHANGING: {
             auto* pos = reinterpret_cast<WINDOWPOS*>(lParam);
-            APPBARDATA abd{};
-            abd.cbSize = sizeof(abd);
-            abd.hWnd = hWnd;
-            if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd) &&
-                abd.uEdge == ABE_BOTTOM && g_settings.marginPx > 0) {
-                UINT dpi = GetDpiForWindow(hWnd);
-                if (dpi == 0) {
-                    dpi = 96;
-                }
-                int margin = MulDiv(g_settings.marginPx, static_cast<int>(dpi), 96);
 
-                pos->x += margin;
-                pos->cx = std::max(0, pos->cx - margin * 2);
-                pos->y -= margin;
-                pos->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
+            // A pure z-order/activation change (no actual move or resize
+            // requested) must be left untouched. Some callers pass back the
+            // window's CURRENT rect (which may already be our inset rect)
+            // for such calls; transforming it anyway would compound the
+            // inset on every such call until the window collapses.
+            bool wantsMove = !(pos->flags & SWP_NOMOVE);
+            bool wantsSize = !(pos->flags & SWP_NOSIZE);
+
+            if (wantsMove && wantsSize && g_settings.marginPx > 0) {
+                // SHAppBarMessage(ABM_GETTASKBARPOS) only reports the
+                // PRIMARY monitor's taskbar position in multi-monitor
+                // setups (a documented Windows limitation), so it cannot be
+                // used to detect the edge for a secondary-monitor tray
+                // window. Instead, compare the proposed rect directly
+                // against this window's own monitor bounds.
+                HMONITOR monitor =
+                    MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO monitorInfo{};
+                monitorInfo.cbSize = sizeof(monitorInfo);
+
+                if (GetMonitorInfo(monitor, &monitorInfo)) {
+                    int proposedBottom = pos->y + pos->cy;
+                    int monitorBottom = monitorInfo.rcMonitor.bottom;
+                    bool isBottomDocked =
+                        std::abs(proposedBottom - monitorBottom) <= 4;
+
+                    if (isBottomDocked) {
+                        UINT dpi = GetDpiForWindow(hWnd);
+                        if (dpi == 0) {
+                            dpi = 96;
+                        }
+                        int margin = MulDiv(g_settings.marginPx,
+                                            static_cast<int>(dpi), 96);
+
+                        pos->x += margin;
+                        pos->cx = std::max(0, pos->cx - margin * 2);
+                        pos->y -= margin;
+                    }
+                }
             }
             break;
         }

@@ -78,6 +78,7 @@ never modified.
 #include <windows.h>
 
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -91,7 +92,6 @@ struct Settings {
 };
 
 Settings g_settings;
-std::mutex g_stateMutex;
 
 struct ExplorerWindowState {
     HWND mainHwnd = nullptr;
@@ -100,7 +100,20 @@ struct ExplorerWindowState {
     bool childrenDiscovered = false;
 };
 
-std::vector<ExplorerWindowState> g_windows;
+// Two separate mutexes by design: DiscoverChildren (which only touches a
+// single ExplorerWindowState, never g_windows itself) calls
+// WatchControlForRoundedSelection, which locks g_watchersMutex. If both used
+// the same mutex, a caller that already holds it while invoking
+// DiscoverChildren (as WM_WINDOWPOSCHANGED and TrackExplorerWindow both do)
+// would deadlock on the second, nested lock attempt of the same
+// non-recursive std::mutex.
+std::mutex g_windowsMutex;
+// unique_ptr elements so pointers into this collection stay valid across
+// push_back-triggered reallocation - needed because callers hold a pointer
+// to one element while running (unlocked) per-window work.
+std::vector<std::unique_ptr<ExplorerWindowState>> g_windows;
+
+std::mutex g_watchersMutex;
 // Immediate parents of tracked controls, subclassed once each to observe
 // WM_NOTIFY / NM_CUSTOMDRAW. A parent may host both the tree view and the
 // list view, so this list is deduplicated independently of g_windows.
@@ -182,7 +195,7 @@ LRESULT CALLBACK NotifyParentSubclassProc(HWND hWnd, UINT uMsg,
     if (uMsg == WM_NOTIFY && g_settings.roundedSelection) {
         NMHDR* hdr = reinterpret_cast<NMHDR*>(lParam);
         if (hdr->code == NM_CUSTOMDRAW) {
-            std::lock_guard<std::mutex> lock(g_stateMutex);
+            std::lock_guard<std::mutex> lock(g_watchersMutex);
             bool watched = std::find(g_watchedControls.begin(),
                                       g_watchedControls.end(),
                                       hdr->hwndFrom) != g_watchedControls.end();
@@ -234,7 +247,7 @@ void WatchControlForRoundedSelection(HWND control) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(g_stateMutex);
+    std::lock_guard<std::mutex> lock(g_watchersMutex);
     if (std::find(g_watchedControls.begin(), g_watchedControls.end(),
                   control) == g_watchedControls.end()) {
         g_watchedControls.push_back(control);
@@ -264,6 +277,22 @@ void DiscoverChildren(ExplorerWindowState& state) {
     state.childrenDiscovered = state.treeView && state.listView;
 }
 
+// Finds the tracked state for hwnd under g_windowsMutex and returns a
+// pointer stable for use AFTER the lock is released (safe because elements
+// are heap-allocated via unique_ptr, so vector reallocation never moves
+// them). Each window's state is only ever touched by the thread handling
+// that window's messages (or, for the one-time discovery call, by whichever
+// thread first tracks it), so no further locking is needed to use it.
+ExplorerWindowState* FindWindowState(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(g_windowsMutex);
+    for (auto& state : g_windows) {
+        if (state->mainHwnd == hwnd) {
+            return state.get();
+        }
+    }
+    return nullptr;
+}
+
 LRESULT CALLBACK ExplorerMainSubclassProc(HWND hWnd, UINT uMsg,
                                            WPARAM wParam, LPARAM lParam,
                                            DWORD_PTR /*dwRefData*/) {
@@ -271,30 +300,76 @@ LRESULT CALLBACK ExplorerMainSubclassProc(HWND hWnd, UINT uMsg,
         case WM_WINDOWPOSCHANGED: {
             ApplyWindowChrome(hWnd);
 
-            std::lock_guard<std::mutex> lock(g_stateMutex);
-            for (auto& state : g_windows) {
-                if (state.mainHwnd == hWnd && !state.childrenDiscovered) {
-                    DiscoverChildren(state);
-                    break;
-                }
+            // DiscoverChildren must run without g_windowsMutex held: it
+            // calls WatchControlForRoundedSelection, which locks
+            // g_watchersMutex - a different mutex, so this is safe and does
+            // not deadlock.
+            ExplorerWindowState* state = FindWindowState(hWnd);
+            if (state && !state->childrenDiscovered) {
+                DiscoverChildren(*state);
             }
             break;
         }
         case WM_NCDESTROY: {
             WindhawkUtils::RemoveWindowSubclassFromAnyThread(
                 hWnd, ExplorerMainSubclassProc);
-            std::lock_guard<std::mutex> lock(g_stateMutex);
+            std::lock_guard<std::mutex> lock(g_windowsMutex);
             g_windows.erase(
-                std::remove_if(g_windows.begin(), g_windows.end(),
-                                [hWnd](const ExplorerWindowState& s) {
-                                    return s.mainHwnd == hWnd;
-                                }),
+                std::remove_if(
+                    g_windows.begin(), g_windows.end(),
+                    [hWnd](const std::unique_ptr<ExplorerWindowState>& s) {
+                        return s->mainHwnd == hWnd;
+                    }),
                 g_windows.end());
             break;
         }
     }
 
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+void TrackExplorerWindow(HWND hwnd) {
+    if (FindWindowState(hwnd)) {
+        return;
+    }
+
+    if (!WindhawkUtils::SetWindowSubclassFromAnyThread(
+            hwnd, ExplorerMainSubclassProc, 0)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_windowsMutex);
+        auto state = std::make_unique<ExplorerWindowState>();
+        state->mainHwnd = hwnd;
+        g_windows.push_back(std::move(state));
+    }
+
+    // The window may already be open and laid out by the time this mod is
+    // enabled - the CreateWindowExW hook alone would never see it, and a
+    // further WM_WINDOWPOSCHANGED may not arrive soon. Apply chrome and
+    // discover children immediately instead of waiting for one.
+    ApplyWindowChrome(hwnd);
+    ExplorerWindowState* state = FindWindowState(hwnd);
+    if (state && !state->childrenDiscovered) {
+        DiscoverChildren(*state);
+    }
+}
+
+BOOL CALLBACK EnumExistingWindowsProc(HWND hwnd, LPARAM /*lParam*/) {
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId != GetCurrentProcessId()) {
+        return TRUE;
+    }
+
+    WCHAR className[64];
+    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) > 0 &&
+        IsExplorerTopLevelClass(className)) {
+        TrackExplorerWindow(hwnd);
+    }
+
+    return TRUE;
 }
 
 HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName,
@@ -309,13 +384,7 @@ HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName,
         return hwnd;
     }
 
-    if (WindhawkUtils::SetWindowSubclassFromAnyThread(
-            hwnd, ExplorerMainSubclassProc, 0)) {
-        std::lock_guard<std::mutex> lock(g_stateMutex);
-        ExplorerWindowState state;
-        state.mainHwnd = hwnd;
-        g_windows.push_back(state);
-    }
+    TrackExplorerWindow(hwnd);
 
     return hwnd;
 }
@@ -364,45 +433,52 @@ BOOL Wh_ModInit() {
                         reinterpret_cast<void*>(CreateWindowExW_Hook),
                         reinterpret_cast<void**>(&g_origCreateWindowExW));
 
+    // Explorer windows already open when this mod is enabled would never be
+    // seen by the CreateWindowExW hook alone - scan for them once too.
+    EnumWindows(EnumExistingWindowsProc, 0);
+
     return TRUE;
 }
 
 void Wh_ModSettingsChanged() {
     LoadSettings();
 
-    std::lock_guard<std::mutex> lock(g_stateMutex);
+    std::lock_guard<std::mutex> lock(g_windowsMutex);
     for (const auto& state : g_windows) {
-        if (IsWindow(state.mainHwnd)) {
-            ApplyWindowChrome(state.mainHwnd);
+        if (IsWindow(state->mainHwnd)) {
+            ApplyWindowChrome(state->mainHwnd);
         }
-        if (state.treeView && IsWindow(state.treeView) &&
+        if (state->treeView && IsWindow(state->treeView) &&
             g_settings.sidebarTheming) {
-            SetWindowTheme(state.treeView, L"Explorer", nullptr);
+            SetWindowTheme(state->treeView, L"Explorer", nullptr);
         }
     }
 }
 
 void Wh_ModUninit() {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
+    {
+        std::lock_guard<std::mutex> lock(g_windowsMutex);
+        for (const auto& state : g_windows) {
+            if (IsWindow(state->mainHwnd)) {
+                WindhawkUtils::RemoveWindowSubclassFromAnyThread(
+                    state->mainHwnd, ExplorerMainSubclassProc);
 
-    for (const auto& state : g_windows) {
-        if (IsWindow(state.mainHwnd)) {
-            WindhawkUtils::RemoveWindowSubclassFromAnyThread(
-                state.mainHwnd, ExplorerMainSubclassProc);
+                DWM_WINDOW_CORNER_PREFERENCE defaultCorner = DWMWCP_DEFAULT;
+                DwmSetWindowAttribute(state->mainHwnd,
+                                       DWMWA_WINDOW_CORNER_PREFERENCE,
+                                       &defaultCorner, sizeof(defaultCorner));
 
-            DWM_WINDOW_CORNER_PREFERENCE defaultCorner = DWMWCP_DEFAULT;
-            DwmSetWindowAttribute(state.mainHwnd,
-                                   DWMWA_WINDOW_CORNER_PREFERENCE,
-                                   &defaultCorner, sizeof(defaultCorner));
-
-            DWM_SYSTEMBACKDROP_TYPE defaultBackdrop = DWMSBT_AUTO;
-            DwmSetWindowAttribute(state.mainHwnd, DWMWA_SYSTEMBACKDROP_TYPE,
-                                   &defaultBackdrop,
-                                   sizeof(defaultBackdrop));
+                DWM_SYSTEMBACKDROP_TYPE defaultBackdrop = DWMSBT_AUTO;
+                DwmSetWindowAttribute(state->mainHwnd,
+                                       DWMWA_SYSTEMBACKDROP_TYPE,
+                                       &defaultBackdrop,
+                                       sizeof(defaultBackdrop));
+            }
         }
+        g_windows.clear();
     }
-    g_windows.clear();
 
+    std::lock_guard<std::mutex> lock(g_watchersMutex);
     for (HWND parent : g_subclassedNotifyParents) {
         if (IsWindow(parent)) {
             WindhawkUtils::RemoveWindowSubclassFromAnyThread(

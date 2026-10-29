@@ -12,6 +12,22 @@ All notable changes to MacFlow are documented in this file.
   `SetWindowSubclass` / `RemoveWindowSubclass` (found via an actual in-app
   compile attempt). `macflow-explorer` was unaffected, it already linked
   comctl32.
+- `macflow-dock`: fixed incorrect multi-monitor behavior. Taskbar-edge
+  detection relied on `SHAppBarMessage(ABM_GETTASKBARPOS)`, which only
+  reports the primary monitor's taskbar; replaced with
+  `MonitorFromWindow`/`GetMonitorInfo` against each window's own monitor.
+  Also fixed a compounding margin bug where the inset transform could reapply
+  on top of itself during pure z-order/activation window messages, causing
+  the dock to visually collapse on one monitor (found via real hands-on
+  testing on a dual-monitor machine).
+- `macflow-notifications`, `macflow-start`, `macflow-explorer`: fixed these
+  mods having no visible effect when their target window already existed
+  before the mod was enabled (the common case) - added an `EnumWindows`
+  initial scan at startup, matching the approach `macflow-dock` already used.
+- `macflow-explorer`: fixed a real deadlock (`WM_WINDOWPOSCHANGED` locking a
+  mutex, then calling into a function that locked the same non-recursive
+  mutex again) on the first layout of any Explorer window, found while
+  fixing the issue above. Split into two separate mutexes.
 
 Initial implementation of the MacFlow suite. Not yet tagged as a release:
 hands-on hardware testing (see `docs/TESTING.md`) is still pending before a
